@@ -130,6 +130,21 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
+def get_dashboard_enabled() -> bool:
+    """Whether the phone dashboard server starts. Off by default.
+
+    The dashboard binds to every network interface (0.0.0.0) so a phone on the
+    same WiFi can reach it, and on first run asks for the macOS password to open
+    the firewall. That is a lot of exposure to switch on silently, especially on
+    a shared network, so it only starts when explicitly enabled.
+    """
+    return load_api_keys().get("dashboard_enabled", False)
+
+
+def save_dashboard_enabled(enabled: bool) -> None:
+    _save_flag("dashboard_enabled", enabled)
+
+
 HUD_STYLES = ("face", "core")
 
 

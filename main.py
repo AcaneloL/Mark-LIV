@@ -72,6 +72,7 @@ from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_dashboard_enabled,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -2067,7 +2068,14 @@ class JarvisLive:
         audio_devices.prefetch()
 
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
+        # Opt-in: it listens on the whole LAN, so it stays off unless
+        # "dashboard_enabled": true is set in config/api_keys.json.
         try:
+            if not get_dashboard_enabled():
+                raise RuntimeError(
+                    'off by default — set "dashboard_enabled": true in '
+                    "config/api_keys.json to use it"
+                )
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
