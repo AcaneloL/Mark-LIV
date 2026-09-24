@@ -958,9 +958,11 @@ class JarvisLive:
             _cfg = json.loads(open(API_CONFIG_PATH, encoding="utf-8").read())
             self._asst_name = (_cfg.get("assistant_name") or "JARVIS").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
+            _pref_lang = (_cfg.get("preferred_language") or "").strip()
         except Exception:
             self._asst_name = "JARVIS"
             _user_name = ""
+            _pref_lang = ""
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
@@ -1017,6 +1019,24 @@ class JarvisLive:
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
+
+        # A fixed language, when the user sets one. By default the reply follows
+        # the language of the last message, which has two gaps: the greeting and
+        # the morning briefing are generated before the user has said anything
+        # (from English instructions, so they come out in English), and a noisy
+        # mic can make the model "hear" another language entirely.
+        if _pref_lang:
+            parts.append(
+                "[LANGUAGE — USER SETTING. This REPLACES the [LANGUAGE] section "
+                "above.]\n"
+                f"The user has chosen to be spoken to in: {_pref_lang}.\n"
+                f"Speak ONLY in {_pref_lang}: greetings, the morning briefing, "
+                "news, confirmations, errors, everything. Keep to it when these "
+                "instructions, a tool result or a web page are in another "
+                "language, and when the audio sounds like another language — "
+                "background noise is easily misheard as speech. Change language "
+                "only if the user explicitly asks you to, in words.\n"
+            )
 
         cfg = dict(
             response_modalities=["AUDIO"],
