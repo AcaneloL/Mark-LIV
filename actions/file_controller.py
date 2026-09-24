@@ -1,6 +1,8 @@
 import os
 import shutil
 import platform
+import subprocess
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 
@@ -148,6 +150,118 @@ def _get_videos() -> Path:
     return Path.home() / "Videos"
 
 
+def _get_universidad() -> Path:
+    """Where the user keeps one folder per course (Documents/Universidad)."""
+    return Path.home() / "Documents" / "Universidad"
+
+
+def _normalize(text: str) -> str:
+    """Lower-case, accent-free, alphanumerics only.
+
+    Spoken requests never match file names character for character: the user
+    says "Ayudantía 4" and the file is "Ayudantia_4_Pauta.pdf". Comparing the
+    normalised forms makes accents, spaces, underscores and case irrelevant.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    no_accents = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return "".join(c for c in no_accents.lower() if c.isalnum())
+
+
+def _loosely_equal(query: str, folder: str) -> bool:
+    """Does a spoken folder name refer to this folder?
+
+    Matches "Finanzas" to "Finanzas l", and "Finanzas I" to "Finanzas l"
+    (a roman one is easily typed as a lower-case L).
+    """
+    q, f = _normalize(query), _normalize(folder)
+    if not q or not f:
+        return False
+    if f.startswith(q) or q.startswith(f):
+        return True
+    return q.rstrip("il1") == f.rstrip("il1") != ""
+
+
+def _fuzzy_dir(raw: str) -> Path | None:
+    """Resolve a spoken folder path ("Finanzas/Ayudantias") to a real folder.
+
+    Only used for read-only actions (find, open, list): a write must never be
+    redirected to a different folder than the one it names.
+    """
+    parts = [p for p in raw.replace("\\", "/").split("/") if p.strip()]
+    if not parts:
+        return None
+    roots = [_get_universidad(), _get_documents(), _get_desktop(),
+             _get_downloads(), Path.home()]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        current = root
+        for part in parts:
+            try:
+                match = next(
+                    (c for c in sorted(current.iterdir())
+                     if c.is_dir() and _loosely_equal(part, c.name)),
+                    None,
+                )
+            except OSError:
+                match = None
+            if match is None:
+                break
+            current = match
+        else:
+            return current
+    return None
+
+
+def _resolve_existing(raw: str) -> Path:
+    """_resolve_path, falling back to a loose match when the path is missing."""
+    target = _resolve_path(raw)
+    if target.exists():
+        return target
+    return _fuzzy_dir(raw) or target
+
+
+# Folders never worth descending into when looking for the user's files. They
+# are huge (Library alone can exhaust any sane directory budget before the
+# walk ever reaches Documents) and never hold what the user is asking for.
+_SKIP_DIRS = {"library", "node_modules", "site-packages", "__pycache__",
+              "applications", ".trash"}
+
+
+def _walk_files(roots: list[Path], max_dirs: int = 4000):
+    """Yield files under the given roots, most relevant roots first."""
+    seen: set[Path] = set()
+    visited = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            here = Path(dirpath)
+            if here in seen:
+                dirnames[:] = []
+                continue
+            seen.add(here)
+            visited += 1
+            if visited > max_dirs:
+                return
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if not d.startswith(".") and d.lower() not in _SKIP_DIRS
+                and not d.endswith((".app", ".photoslibrary", ".musiclibrary"))
+            )
+            for filename in filenames:
+                if not filename.startswith("."):
+                    yield here / filename
+
+
+def _search_roots(search_path: Path) -> list[Path]:
+    """From home, look where the user's files actually live before the rest."""
+    if search_path == Path.home():
+        return [_get_universidad(), _get_documents(), _get_desktop(),
+                _get_downloads(), Path.home()]
+    return [search_path]
+
+
 def _resolve_path(raw: str) -> Path:
     shortcuts: dict[str, Path] = {
         "desktop":   _get_desktop(),
@@ -157,6 +271,9 @@ def _resolve_path(raw: str) -> Path:
         "music":     _get_music(),
         "videos":    _get_videos(),
         "home":      Path.home(),
+        "universidad": _get_universidad(),
+        "university":  _get_universidad(),
+        "uni":         _get_universidad(),
     }
     raw   = raw.strip().strip('"').strip("'")
     lower = raw.lower()
@@ -453,27 +570,25 @@ def write_file(path: str, name: str = "", content: str = "",
 def find_files(name: str = "", extension: str = "",
                path: str = "home", max_results: int = 20) -> str:
     try:
-        search_path = _resolve_path(path)
+        search_path = _resolve_existing(path)
+        note = ""
+        if not search_path.exists():
+            # A folder name the loose match could not place: search everywhere
+            # rather than failing, and say so.
+            note = f"(No folder matched '{path}', so I searched everywhere.)\n"
+            search_path = Path.home()
         if not _is_safe_path(search_path):
             return f"Access denied: {search_path}"
-        if not search_path.exists():
-            return f"Search path not found: {path}"
 
-        results    = []
-        dir_count  = 0
-        max_dirs   = 500  # performance + safety limit
+        wanted  = _normalize(name)
+        if extension and not extension.startswith("."):
+            extension = "." + extension
+        results = []
 
-        for item in search_path.rglob("*"):
-            if item.is_dir():
-                dir_count += 1
-                if dir_count > max_dirs:
-                    break
-                continue
-            if not item.is_file():
-                continue
+        for item in _walk_files(_search_roots(search_path)):
             if extension and item.suffix.lower() != extension.lower():
                 continue
-            if name and name.lower() not in item.name.lower():
+            if wanted and wanted not in _normalize(item.name):
                 continue
             size = _format_size(item.stat().st_size)
             results.append(f"📄 {item.name} ({size}) — {item.parent}")
@@ -482,9 +597,9 @@ def find_files(name: str = "", extension: str = "",
 
         if not results:
             query = name or extension or "files"
-            return f"No {query} found in {search_path.name}/"
+            return f"{note}No {query} found in {search_path.name}/"
 
-        return f"Found {len(results)} file(s):\n" + "\n".join(results)
+        return f"{note}Found {len(results)} file(s):\n" + "\n".join(results)
 
     except Exception as e:
         return f"Search error: {e}"
@@ -645,6 +760,84 @@ def get_file_info(path: str, name: str = "") -> str:
     except Exception as e:
         return f"Could not get file info: {e}"
 
+# Opening one of these does not show a document, it RUNS something: on macOS a
+# .command or .sh opens in Terminal and executes, a .py goes to the Python
+# Launcher. A file the assistant was talked into opening by a web page or a
+# document must never be able to do that.
+_NEVER_OPEN = {
+    ".app", ".command", ".sh", ".bash", ".zsh", ".csh", ".tool", ".terminal",
+    ".pkg", ".mpkg", ".dmg", ".workflow", ".action", ".jar", ".py", ".pyw",
+    ".pl", ".rb", ".scpt", ".scptd", ".applescript", ".exe", ".bat", ".cmd",
+    ".msi", ".ps1", ".vbs", ".lnk", ".reg", ".desktop", ".run", ".bin",
+}
+
+
+def _open_with_default_app(target: Path) -> None:
+    if _OS == "Darwin":
+        subprocess.run(["open", str(target)], check=True)
+    elif _OS == "Windows":
+        os.startfile(str(target))  # type: ignore[attr-defined]
+    else:
+        subprocess.run(["xdg-open", str(target)], check=True)
+
+
+def open_file(path: str = "home", name: str = "") -> str:
+    """Open a file with its default app, or a folder in the file manager.
+
+    With a name, looks it up loosely (accents, spaces and underscores do not
+    matter) and opens the closest match, listing the others it found.
+    """
+    try:
+        base = _resolve_existing(path)
+        target = None
+        others: list[Path] = []
+
+        if name:
+            direct = base / name
+            if direct.exists():
+                target = direct
+            else:
+                wanted = _normalize(Path(name).stem) or _normalize(name)
+                roots = _search_roots(base if base.is_dir() else Path.home())
+                matches = [f for f in _walk_files(roots)
+                           if wanted and wanted in _normalize(f.name)]
+                # Closest first: the match with the fewest extra characters.
+                matches.sort(key=lambda f: (len(_normalize(f.name)) - len(wanted),
+                                            str(f)))
+                if not matches:
+                    return (f"I could not find a file matching '{name}'"
+                            f"{' in ' + base.name if base.exists() else ''}.")
+                target, others = matches[0], matches[1:5]
+        else:
+            if not base.exists():
+                return f"Path not found: {path}"
+            target = base
+
+        if not _is_safe_path(target):
+            return f"Access denied: {target}"
+
+        if target.is_file():
+            executable = (target.suffix.lower() in _NEVER_OPEN
+                          or (not target.suffix and os.access(target, os.X_OK)))
+            if executable:
+                return (f"I will not open '{target.name}': it is a program or "
+                        f"script, and opening it would run it. The user has to "
+                        f"open it themselves.")
+
+        _open_with_default_app(target)
+
+        kind = "folder" if target.is_dir() else "file"
+        message = f"Opened the {kind} '{target.name}' ({target.parent})."
+        if others:
+            message += " Other matches: " + "; ".join(o.name for o in others)
+        return message
+
+    except subprocess.CalledProcessError as e:
+        return f"The system could not open it: {e}"
+    except Exception as e:
+        return f"Open error: {e}"
+
+
 def file_controller(
     parameters: dict = None,
     response=None,
@@ -691,11 +884,14 @@ def file_controller(
                 append=params.get("append", False)
             )
 
+        elif action == "open":
+            return open_file(params.get("path") or "home", name=name)
+
         elif action == "find":
             return find_files(
                 name=name or params.get("name", ""),
                 extension=params.get("extension", ""),
-                path=path,
+                path=params.get("path") or "home",
                 max_results=min(int(params.get("max_results", 20)), 50),
             )
 
@@ -724,17 +920,17 @@ def file_controller(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages files and folders: open (a file in its app, or a folder in Finder), list, create, delete, move, copy, rename, read, write, find, disk usage. To open or find something by name you do NOT need the exact name or folder: names are matched ignoring accents, spaces, underscores and case, and course folders under Documents/Universidad are matched loosely ('Finanzas' finds 'Finanzas l').",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
+                "description": "open | list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info. Use open when the user asks to open/show/abrir a file or folder."
             },
             "path": {
                 "type": "STRING",
-                "description": "File/folder path or shortcut: desktop, downloads, documents, home"
+                "description": "File/folder path or shortcut: desktop, downloads, documents, home, universidad. A course name (e.g. 'Finanzas', 'Micro') or 'Finanzas/Ayudantias' also works. Omit it to search everywhere."
             },
             "destination": {
                 "type": "STRING",
@@ -750,7 +946,7 @@ TOOL = {
             },
             "name": {
                 "type": "STRING",
-                "description": "File name to search for"
+                "description": "File name to open or search for; a partial name works (e.g. 'Ayudantia 4')"
             },
             "extension": {
                 "type": "STRING",
