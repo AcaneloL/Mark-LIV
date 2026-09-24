@@ -1033,8 +1033,8 @@ class JarvisLive:
                 f"Speak ONLY in {_pref_lang}: greetings, the morning briefing, "
                 "news, confirmations, errors, everything. Keep to it when these "
                 "instructions, a tool result or a web page are in another "
-                "language, and when the audio sounds like another language — "
-                "background noise is easily misheard as speech. Change language "
+                "language. If you cannot tell which language the user spoke "
+                f"in, assume {_pref_lang} and answer normally. Change language "
                 "only if the user explicitly asks you to, in words.\n"
             )
 
