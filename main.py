@@ -72,7 +72,7 @@ from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
-    get_dashboard_enabled,
+    get_dashboard_enabled, get_morning_news_enabled, get_preferred_language,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -1759,13 +1759,18 @@ class JarvisLive:
             e = identity.get(k, {})
             return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
 
-        lang = _val("language")
+        # A chosen language beats the remembered one. The remembered one is a
+        # guess made from audio, and it has been wrong ("Chinese" for a Spanish
+        # speaker after a noisy first session) — the greeting must not repeat it.
+        lang = get_preferred_language() or _val("language")
         name = _val("name")
         time_str = datetime.now().strftime("%H:%M")
+        news_on = get_morning_news_enabled()
 
         # Start fetching news immediately — runs in parallel while phase 1 plays
         loop = asyncio.get_event_loop()
-        news_future = loop.run_in_executor(None, _fetch_news_sync, "top world news today")
+        news_future = (loop.run_in_executor(None, _fetch_news_sync, "top world news today")
+                       if news_on else None)
 
         await asyncio.sleep(0.3)
         if not self.session:
@@ -1793,10 +1798,17 @@ class JarvisLive:
                 f" Also briefly and naturally mention that {_when}: {last['summary']}"
             )
 
-        p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
-            f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
-        )
+        if news_on:
+            p1 = (
+                f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
+                f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
+            )
+        else:
+            p1 = (
+                f"Greet the user warmly, mention it is {time_str}, and ask what they need.{session_clause} "
+                f"Keep it to 2 short sentences max. Do not mention the news and do not "
+                f"call any tools.{lang_clause}{name_clause}"
+            )
 
         # Clear the turn-done event so we can wait for Phase 1 to finish
         if self._turn_done_event:
@@ -1875,7 +1887,8 @@ class JarvisLive:
                 print(f"[JARVIS] Briefing phase 2 failed: {e}")
                 self.ui.write_log("SYS: Could not fetch the news for the briefing.")
 
-        asyncio.create_task(_deliver_news())
+        if news_on:
+            asyncio.create_task(_deliver_news())
 
     # ── Session memory ──────────────────────────────────────────────────────────
 

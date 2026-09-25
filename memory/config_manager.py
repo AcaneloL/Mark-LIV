@@ -298,6 +298,25 @@ def get_brief_enabled() -> bool:
     return load_api_keys().get("morning_brief_enabled", True)
 
 
+def get_morning_news_enabled() -> bool:
+    """Whether the startup briefing reads the news after the greeting.
+
+    Separate from morning_brief_enabled so the greeting can stay while the
+    news goes: some users want to be greeted but hear the news only when they
+    ask for it (web_search has a news mode for that).
+    """
+    return load_api_keys().get("morning_news_enabled", True)
+
+
+def save_morning_news_enabled(enabled: bool) -> None:
+    _save_flag("morning_news_enabled", enabled)
+
+
+def get_preferred_language() -> str:
+    """The language the user chose to be spoken to in, or "" if none."""
+    return (load_api_keys().get("preferred_language") or "").strip()
+
+
 def save_brief_enabled(enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}
