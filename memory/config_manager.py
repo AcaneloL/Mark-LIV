@@ -145,6 +145,20 @@ def save_dashboard_enabled(enabled: bool) -> None:
     _save_flag("dashboard_enabled", enabled)
 
 
+def get_grounded_search_enabled() -> bool:
+    """Whether web_search tries Gemini with Google Search grounding first.
+
+    Off by default: grounding is not offered on the Gemini API free tier, so on
+    a free key every attempt is a guaranteed 429 — three dead round-trips before
+    each search fell through to DuckDuckGo anyway. Turn it on for a billed key.
+    """
+    return load_api_keys().get("grounded_search_enabled", False)
+
+
+def save_grounded_search_enabled(enabled: bool) -> None:
+    _save_flag("grounded_search_enabled", enabled)
+
+
 HUD_STYLES = ("face", "core")
 
 

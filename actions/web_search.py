@@ -24,13 +24,18 @@ def _note_gemini_error(exc: Exception) -> None:
     """Trip the breaker when the error is a quota / rate-limit rejection."""
     global _quota_blocked_until
     msg = str(exc)
-    if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+    # When every model on the ladder fails, gemini.call() returns None and the
+    # error raised is "every Gemini model on the ladder failed" — no 429 in it.
+    # The breaker used to ignore that, so each search repeated the same dead
+    # calls. A whole ladder failing is exactly the case worth backing off from.
+    if ("429" in msg or "RESOURCE_EXHAUSTED" in msg
+            or "ladder failed" in msg):
         with _quota_lock:
             already = time.monotonic() < _quota_blocked_until
             _quota_blocked_until = time.monotonic() + _QUOTA_COOLDOWN_SEC
         if not already:
             print(
-                "[WebSearch] Gemini grounding quota exhausted — skipping it for "
+                "[WebSearch] Gemini grounding unavailable — skipping it for "
                 f"{_QUOTA_COOLDOWN_SEC // 60} min and serving results from DDG."
             )
 
@@ -78,7 +83,21 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+def _grounding_enabled() -> bool:
+    """False on a free-tier key, where grounding does not exist (see
+    get_grounded_search_enabled). Unreadable config also means False: the cost
+    of guessing wrong is only a search served from DDG."""
+    try:
+        from memory.config_manager import get_grounded_search_enabled
+        return get_grounded_search_enabled()
+    except Exception:
+        return False
+
+
 def _gemini_search(query: str) -> str:
+    # Same silent path as the quota cooldown: callers already fall back to DDG.
+    if not _grounding_enabled():
+        raise _QuotaCooldown("grounded search is off (free-tier key)")
     if not _gemini_available():
         raise _QuotaCooldown("Gemini grounding is in quota cooldown")
 
