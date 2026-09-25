@@ -113,13 +113,33 @@ SEARCH = "search"  # grounded search — REST only, see below
 #     on REST — see SEARCH.
 LIVE = "live"
 
+# Chosen 2026-09-25 with a free-tier key on a project created in 2026. The 2.5
+# models answer 404 "no longer available to new users" (they are limited to
+# past users since 2026-09-18), so a fresh install could not reach a single
+# REST rung and every side call leaned on Live alone. Measured that day:
+#     gemini-3.5-flash-lite    1.48s   Google's pick for low latency / volume
+#     gemini-3.6-flash         2.05s   best model that answered; ~5 RPM free
+#     gemini-3.1-flash-lite    2.32s   shuts down 2027-05-07
+#     gemini-3.8 / 3.7-flash   503 UNAVAILABLE
+#     gemini-3.5-flash         timed out at 30s
+#     gemini-3-flash-preview   9.42s
+#     gemini-3.1-pro-preview   0 RPM on the free tier
+# Free-tier quota behaves per model (3.6-flash ran dry while 3.5-flash-lite
+# kept answering), so each rung is a DIFFERENT model: when one is spent, the
+# next still has its whole allowance. Google does not document this outright.
 _LADDERS = {
-    FAST: (LIVE, "gemini-2.5-flash-lite", "gemini-2.5-flash"),
-    SMART: (LIVE, "gemini-2.5-flash", "gemini-2.5-flash-lite"),
+    FAST: (LIVE, "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"),
+    SMART: (LIVE, "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"),
     # Grounded search needs response.candidates[...].grounding_metadata, which a
     # Live turn does not produce. REST only, and it says so rather than silently
     # returning an answer with no sources behind it.
-    SEARCH: ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"),
+    #
+    # Google Search grounding is "Not available" on the free tier for every
+    # model (pricing page) — confirmed: every grounded call returned 429 from the
+    # very first request while plain calls to the same models succeeded. So
+    # web_search only reaches this ladder when "grounded_search_enabled" is set,
+    # i.e. on a billed project. Both models are listed as supporting grounding.
+    SEARCH: ("gemini-3.5-flash-lite", "gemini-3.6-flash"),
 }
 
 # The Live model to use for one-shot calls. main.py owns the real one; this is
@@ -174,13 +194,23 @@ _cached_key: str | None = None
 # reaching the model that could actually answer. Remembering that for a few
 # minutes turns the ladder from a cost into a saving.
 _COOLDOWN_SECONDS = 300
+
+# Two more failures that answer the same on the next call and should not be
+# paid for again on every request:
+#   503 UNAVAILABLE — the model is overloaded. Transient, so a short pause.
+#       Measured: gemini-3.1-flash-lite answered 503 twice in three calls, and
+#       one ladder call spent 18s retrying it before giving up.
+#   404 "no longer available" — the model is gone for this key (how the 2.5
+#       models went for new accounts). It will not come back this session.
+_OVERLOADED_SECONDS = 60
+_GONE_SECONDS = 24 * 3600
 _cooldown: dict[str, float] = {}
 _cool_lock = threading.Lock()
 
 
-def _cool(model: str) -> None:
+def _cool(model: str, seconds: float = _COOLDOWN_SECONDS) -> None:
     with _cool_lock:
-        _cooldown[model] = time.monotonic() + _COOLDOWN_SECONDS
+        _cooldown[model] = time.monotonic() + seconds
 
 
 def _cooling(model: str) -> bool:
@@ -406,6 +436,14 @@ def call(contents, tier: str = FAST, config=None,
                 _cool(model)
                 print(f"[Gemini] {model}: out of quota — skipping it for "
                       f"{_COOLDOWN_SECONDS // 60} minutes")
+            elif "no longer available" in msg or ("404" in msg and "NOT_FOUND" in msg):
+                _cool(model, _GONE_SECONDS)
+                print(f"[Gemini] {model}: not available to this key — skipping "
+                      f"it for the rest of the session")
+            elif "503" in msg or "UNAVAILABLE" in msg:
+                _cool(model, _OVERLOADED_SECONDS)
+                print(f"[Gemini] {model}: overloaded (503) — skipping it for "
+                      f"{_OVERLOADED_SECONDS} seconds")
             else:
                 print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
     return None
